@@ -20,6 +20,7 @@ import ochopod
 import os
 import threading
 import time
+import socket
 
 from copy import deepcopy
 from ochopod.api import LifeCycle, Model
@@ -39,7 +40,7 @@ logger = logging.getLogger('ochopod')
 
 class Pod(KVMMarathon):
     """
-    Implementation for the :class:`ochopod.bindings.ec2.api.EC2Marathon` interface.
+    Implementation for the :class:`ochopod.bindings.kvm.api.EC2Marathon` interface.
     """
 
     def boot(self, lifecycle, model=Reactive, local=0):
@@ -53,7 +54,7 @@ class Pod(KVMMarathon):
         #
         # - start logging to /var/log/ochopod.log
         #
-        logger.info('EC2 marathon bindings started')
+        logger.info('KVM marathon bindings started')
         web = Flask(__name__)
 
         #
@@ -105,7 +106,7 @@ class Pod(KVMMarathon):
                 logger.info('running in local mode (make sure you run a standalone zookeeper)')
                 hints.update(
                     {
-                        'fwk': 'marathon-ec2',
+                        'fwk': 'marathon-kvm,
                         'ip': '127.0.0.1',
                         'node': 'local',
                         'ports': ports,
@@ -115,12 +116,12 @@ class Pod(KVMMarathon):
             else:
 
                 #
-                # - we are (assuming to be) deployed on EC2
-                # - get our underlying metadata using curl
+                # - we are (assuming to be) deployed on KVM based Docker
+                # container
                 #
-                def _peek(token):
-                    code, lines = shell('curl -f http://169.254.169.254/latest/meta-data/%s' % token)
-                    assert code is 0, 'unable to lookup EC2 metadata for %s (are you running on EC2 ?)' % token
+                def _hostIp():
+                    code, lines = shell('/sbin/ip route | awk \'/default/ {print $3}\'')
+                    assert code is 0, "unable to get Docker host ip"
                     return lines[0]
 
                 #
@@ -130,11 +131,11 @@ class Pod(KVMMarathon):
                 hints.update(
                     {
                         'application': env['MARATHON_APP_ID'][1:],
-                        'fwk': 'marathon-ec2',
-                        'ip': _peek('local-ipv4'),
-                        'node': _peek('instance-id'),
+                        'fwk': 'marathon-kvm',
+                        'ip': _hostIp(),
+                        'node': socket.gethostname(),
                         'ports': ports,
-                        'public': _peek('public-ipv4'),
+                        'public': _hostIp(),
                         'task': env['MESOS_TASK_ID'],
                         'zk': ''
                     })
@@ -143,13 +144,14 @@ class Pod(KVMMarathon):
 
                     #
                     # - a regular package install will write the slave settings under /etc/mesos/zk
-                    # - the snippet in there looks like zk://10.0.0.56:2181/mesos
+                    # - This is mesos-slave /etc/mesos which contains zookeeper
+                    # config
                     #
                     code, lines = shell("cat /etc/mesos/zk")
                     assert code is 0 and lines[0], 'unable to retrieve the zk connection string'
                     return lines[0][5:].split('/')[0]
 
-                def _dcos_deployment():
+                # def _dcos_deployment():
 
                     #
                     # - a DCOS slave is setup slightly differently with the settings being environment
@@ -157,9 +159,9 @@ class Pod(KVMMarathon):
                     # - the snippet in there is prefixed by MESOS_MASTER= and uses an alias
                     # - it looks like MESOS_MASTER=zk://leader.mesos:2181/mesos
                     #
-                    code, lines = shell("grep MASTER /opt/mesosphere/etc/mesos-slave")
-                    assert code is 0 and lines[0], 'unable to retrieve the zk connection string'
-                    return lines[0][18:].split('/')[0]
+                #    code, lines = shell("grep MASTER /opt/mesosphere/etc/mesos-slave")
+                #    assert code is 0 and lines[0], 'unable to retrieve the zk connection string'
+                #    return lines[0][18:].split('/')[0]
 
                 #
                 # - depending on how the slave has been installed we might have to look in various places
@@ -167,7 +169,7 @@ class Pod(KVMMarathon):
                 # - warning, a URL like format such as zk://<ip:port>,..,<ip:port>/mesos is used
                 # - just keep the ip & port part and discard the rest
                 #
-                for method in [_install_from_package, _dcos_deployment]:
+                for method in [_install_from_package]:
                     try:
                         hints['zk'] = method()
                         break
@@ -192,7 +194,7 @@ class Pod(KVMMarathon):
             #   the coordinator (especially the pod index which is derived from zookeeper)
             #
             latch = ThreadingFuture()
-            logger.info('starting %s.%s (marathon/ec2) @ %s' % (hints['namespace'], hints['cluster'], hints['node']))
+            logger.info('starting %s.%s (marathon/kvm) @ %s' % (hints['namespace'], hints['cluster'], hints['node']))
             breadcrumbs = deepcopy(hints)
             env.update({'ochopod': json.dumps(hints)})
             executor = lifecycle.start(env, latch, hints)
